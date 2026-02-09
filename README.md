@@ -1,4 +1,3 @@
-Teste
 # Busca CEP API
 
 API simples em Node.js puro para consultar CEP com fallback entre provedores publicos.

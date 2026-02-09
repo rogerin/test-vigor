@@ -141,11 +141,6 @@ async function lookupCep(cep) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   
-  // Method Check
-  if (req.method !== 'GET') {
-    return sendJson(res, 405, { error: 'Method not allowed' });
-  }
-
   // Route Check
   const match = url.pathname.match(/^\/cep\/(\d{8})$/);
   if (!match) {
