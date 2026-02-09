@@ -1,9 +1,7 @@
 const http = require('http');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3004;
-const TIMEOUT_MS = 4000;
-
-// --- Helper Functions ---
+const HEALTH_TEST_CEP = process.env.HEALTH_TEST_CEP || '01001000';
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -111,7 +109,30 @@ const providers = {
   }
 };
 
-// --- Logic ---
+  if (status === 404 || (data && data.status === 404)) {
+    return null;
+  }
+
+  throw new Error(`AwesomeAPI status ${status}`);
+}
+
+const providers = [
+  {
+    name: 'viacep',
+    fetch: fetchViaCEP,
+    healthUrl: (cep) => `https://viacep.com.br/ws/${cep}/json/`,
+  },
+  {
+    name: 'brasilapi',
+    fetch: fetchBrasilAPI,
+    healthUrl: (cep) => `https://brasilapi.com.br/api/cep/v1/${cep}`,
+  },
+  {
+    name: 'awesomeapi',
+    fetch: fetchAwesomeAPI,
+    healthUrl: (cep) => `https://cep.awesomeapi.com.br/json/${cep}`,
+  },
+];
 
 async function lookupCep(cep) {
   // Create an array of promises calling all providers simultaneously
@@ -136,13 +157,67 @@ async function lookupCep(cep) {
   }
 }
 
-// --- Server ---
+function isValidCep(value) {
+  return /^\d{8}$/.test(value);
+}
+
+async function checkProvidersHealth(cep) {
+  const results = await Promise.all(
+    providers.map(async (provider) => {
+      const startedAt = Date.now();
+      try {
+        const result = await provider.fetch(cep);
+        const durationMs = Date.now() - startedAt;
+        return {
+          provider: provider.name,
+          url: provider.healthUrl(cep),
+          ok: Boolean(result),
+          responseTimeMs: durationMs,
+          error: result ? null : 'CEP nao encontrado no provedor',
+        };
+      } catch (err) {
+        return {
+          provider: provider.name,
+          url: provider.healthUrl(cep),
+          ok: false,
+          responseTimeMs: Date.now() - startedAt,
+          error: err.message,
+        };
+      }
+    })
+  );
+
+  return results;
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   
   // Route Check
   const match = url.pathname.match(/^\/cep\/(\d{8})$/);
+
+  if (req.method !== 'GET') {
+    return sendJson(res, 405, { error: 'Metodo nao permitido' });
+  }
+
+  if (url.pathname === '/health') {
+    const cepToTest = normalizeCep(url.searchParams.get('cep') || HEALTH_TEST_CEP);
+    if (!isValidCep(cepToTest)) {
+      return sendJson(res, 400, {
+        error: 'CEP invalido para health! Use 8 digitos, example: 01001000',
+      });
+    }
+
+    const providersHealth = await checkProvidersHealth(cepToTest);
+    const allOk = providersHealth.every((item) => item.ok);
+
+    return sendJson(res, allOk ? 200 : 503, {
+      status: allOk ? 'ok' : 'degraded',
+      cepTest: cepToTest,
+      providers: providersHealth,
+    });
+  }
+
   if (!match) {
     if (url.pathname.startsWith('/cep/')) {
       return sendJson(res, 400, { error: 'Invalid CEP format. Use 8 digits.' });
