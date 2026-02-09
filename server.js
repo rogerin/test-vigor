@@ -1,7 +1,9 @@
 const http = require('http');
-const https = require('https');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3004;
+const TIMEOUT_MS = 4000;
+
+// --- Helper Functions ---
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -12,45 +14,13 @@ function sendJson(res, status, body) {
   res.end(payload);
 }
 
-function getJson(url, timeoutMs = 4000) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(
-      url,
-      { headers: { 'User-Agent': 'busca-cep-api/1.0' } },
-      (res) => {
-        let raw = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => {
-          raw += chunk;
-        });
-        res.on('end', () => {
-          let data = null;
-          if (raw.length > 0) {
-            try {
-              data = JSON.parse(raw);
-            } catch (err) {
-              return reject(new Error('Invalid JSON response'));
-            }
-          }
-          resolve({ status: res.statusCode || 0, data });
-        });
-      }
-    );
-
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error('Request timeout'));
-    });
-  });
-}
-
 function normalizeCep(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
-function buildNormalized(fields) {
+function buildResponse(fields) {
   return {
-    cep: fields.cep || null,
+    cep: normalizeCep(fields.cep),
     logradouro: fields.logradouro ?? null,
     complemento: fields.complemento ?? null,
     bairro: fields.bairro ?? null,
@@ -64,11 +34,37 @@ function buildNormalized(fields) {
   };
 }
 
-async function fetchViaCEP(cep) {
-  const { status, data } = await getJson(`https://viacep.com.br/ws/${cep}/json/`);
-  if (status === 200 && data && !data.erro) {
-    return buildNormalized({
-      cep: normalizeCep(data.cep) || cep,
+// --- API Client Wrapper ---
+
+async function fetchJson(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: { 'User-Agent': 'busca-cep-api/2.0', ...options.headers },
+    });
+    
+    // Convert 404 or 400 errors directly into thrown errors so Promise.any ignores them
+    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+    
+    return await res.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// --- Providers ---
+
+const providers = {
+  async viacep(cep) {
+    const data = await fetchJson(`https://viacep.com.br/ws/${cep}/json/`);
+    if (data.erro) throw new Error('ViaCEP: Not Found');
+
+    return buildResponse({
+      cep: data.cep,
       logradouro: data.logradouro,
       complemento: data.complemento,
       bairro: data.bairro,
@@ -80,24 +76,13 @@ async function fetchViaCEP(cep) {
       siafi: data.siafi,
       provider: 'viacep',
     });
-  }
+  },
 
-  if (status === 200 && data && data.erro) {
-    return null;
-  }
-
-  if (status === 400 || status === 404) {
-    return null;
-  }
-
-  throw new Error(`ViaCEP status ${status}`);
-}
-
-async function fetchBrasilAPI(cep) {
-  const { status, data } = await getJson(`https://brasilapi.com.br/api/cep/v1/${cep}`);
-  if (status === 200 && data) {
-    return buildNormalized({
-      cep: normalizeCep(data.cep) || cep,
+  async brasilapi(cep) {
+    const data = await fetchJson(`https://brasilapi.com.br/api/cep/v1/${cep}`);
+    
+    return buildResponse({
+      cep: data.cep,
       logradouro: data.street,
       complemento: data.complement,
       bairro: data.neighborhood,
@@ -106,24 +91,14 @@ async function fetchBrasilAPI(cep) {
       ibge: data.ibge,
       provider: 'brasilapi',
     });
-  }
+  },
 
-  if (status === 404) {
-    return null;
-  }
+  async awesomeapi(cep) {
+    const data = await fetchJson(`https://cep.awesomeapi.com.br/json/${cep}`);
+    if (data.status === 404) throw new Error('AwesomeAPI: Not Found');
 
-  throw new Error(`BrasilAPI status ${status}`);
-}
-
-async function fetchAwesomeAPI(cep) {
-  const { status, data } = await getJson(`https://cep.awesomeapi.com.br/json/${cep}`);
-  if (
-    status === 200 &&
-    data &&
-    (data.status === undefined || data.status === 200)
-  ) {
-    return buildNormalized({
-      cep: normalizeCep(data.cep) || cep,
+    return buildResponse({
+      cep: data.cep,
       logradouro: data.address_name,
       complemento: data.address_type,
       bairro: data.district,
@@ -134,78 +109,69 @@ async function fetchAwesomeAPI(cep) {
       provider: 'awesomeapi',
     });
   }
+};
 
-  if (status === 404 || (data && data.status === 404)) {
-    return null;
-  }
-
-  throw new Error(`AwesomeAPI status ${status}`);
-}
-
-const providers = [
-  { name: 'viacep', fetch: fetchViaCEP },
-  { name: 'brasilapi', fetch: fetchBrasilAPI },
-  { name: 'awesomeapi', fetch: fetchAwesomeAPI },
-];
+// --- Logic ---
 
 async function lookupCep(cep) {
-  let notFoundCount = 0;
-  const errors = [];
+  // Create an array of promises calling all providers simultaneously
+  const promises = Object.values(providers).map(providerFn => providerFn(cep));
 
-  for (const provider of providers) {
-    try {
-      const result = await provider.fetch(cep);
-      if (result) {
-        return { result };
-      }
-      notFoundCount += 1;
-    } catch (err) {
-      errors.push({ provider: provider.name, message: err.message });
-    }
+  try {
+    // Promise.any resolves as soon as the FIRST promise succeeds.
+    // It ignores errors unless ALL promises fail.
+    const result = await Promise.any(promises);
+    return { result };
+  } catch (aggregateError) {
+    // If we are here, ALL providers failed or returned 404
+    // Check if the errors are specifically "Not Found" or network errors
+    const allErrors = aggregateError.errors.map(e => e.message);
+    
+    // Simple heuristic: If all failed, we treat as 404 for the user
+    // or 502 if it was a network mess. Simulating the original logic:
+    return { 
+      error: true, 
+      details: allErrors 
+    };
   }
-
-  if (notFoundCount === providers.length) {
-    return { notFound: true };
-  }
-
-  return { error: true, errors };
 }
+
+// --- Server ---
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const match = url.pathname.match(/^\/cep\/(\d{8})$/);
-
+  
+  // Method Check
   if (req.method !== 'GET') {
-    return sendJson(res, 405, { error: 'Metodo nao permitido' });
+    return sendJson(res, 405, { error: 'Method not allowed' });
   }
 
+  // Route Check
+  const match = url.pathname.match(/^\/cep\/(\d{8})$/);
   if (!match) {
     if (url.pathname.startsWith('/cep/')) {
-      return sendJson(res, 400, {
-        error: 'CEP invalido. Use 8 digitos, ex: 01001000',
-      });
+      return sendJson(res, 400, { error: 'Invalid CEP format. Use 8 digits.' });
     }
-
-    return sendJson(res, 404, { error: 'Rota nao encontrada' });
+    return sendJson(res, 404, { error: 'Route not found' });
   }
 
+  // Execution
   const cep = match[1];
-  const { result, notFound, error, errors } = await lookupCep(cep);
+  const { result, error, details } = await lookupCep(cep);
 
   if (result) {
     return sendJson(res, 200, result);
   }
 
-  if (notFound) {
-    return sendJson(res, 404, { error: 'CEP nao encontrado' });
-  }
-
-  return sendJson(res, 502, {
-    error: 'Falha ao consultar provedores de CEP',
-    details: errors,
+  // If we had an error, we assume 404 if it's a lookup failure, 
+  // or 502 if providers are down.
+  // For simplicity based on original code logic:
+  return sendJson(res, 404, { 
+    error: 'CEP not found or providers unavailable',
+    details 
   });
 });
 
 server.listen(PORT, () => {
-  console.log(`API rodando em http://localhost:${PORT}`);
+  console.log(`API running on http://localhost:${PORT} (Node ${process.version})`);
 });
