@@ -229,7 +229,7 @@ const server = http.createServer(async (req, res) => {
     const cepToTest = normalizeCep(url.searchParams.get('cep') || HEALTH_TEST_CEP);
     if (!isValidCep(cepToTest)) {
       return sendJson(res, 400, {
-        error: 'CEP invalido para health. Use 8 digitos, ex: 01001000',
+        error: 'CEP invalido para health! Use 8 digitos, ex: 01001000',
       });
     }
 
