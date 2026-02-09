@@ -1,0 +1,9 @@
+{
+  "name": "busca-cep-api",
+  "version": "1.0.0",
+  "description": "API simples de busca de CEP com fallback entre APIs publicas",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
