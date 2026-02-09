@@ -3,6 +3,9 @@ const https = require('https');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3004;
 const HEALTH_TEST_CEP = process.env.HEALTH_TEST_CEP || '01001000';
+const PROVIDER_TIMEOUT_MS = process.env.PROVIDER_TIMEOUT_MS
+  ? Number(process.env.PROVIDER_TIMEOUT_MS)
+  : 5000;
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -13,11 +16,12 @@ function sendJson(res, status, body) {
   res.end(payload);
 }
 
-function getJson(url, timeoutMs = 4000) {
+function getJson(url, options = {}) {
+  const { timeoutMs = 4000, signal } = options;
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
-      { headers: { 'User-Agent': 'busca-cep-api/1.0' } },
+      { headers: { 'User-Agent': 'busca-cep-api/1.0' }, signal },
       (res) => {
         let raw = '';
         res.setEncoding('utf8');
@@ -65,8 +69,11 @@ function buildNormalized(fields) {
   };
 }
 
-async function fetchViaCEP(cep) {
-  const { status, data } = await getJson(`https://viacep.com.br/ws/${cep}/json/`);
+async function fetchViaCEP(cep, options = {}) {
+  const { status, data } = await getJson(
+    `https://viacep.com.br/ws/${cep}/json/`,
+    options
+  );
   if (status === 200 && data && !data.erro) {
     return buildNormalized({
       cep: normalizeCep(data.cep) || cep,
@@ -94,8 +101,11 @@ async function fetchViaCEP(cep) {
   throw new Error(`ViaCEP status ${status}`);
 }
 
-async function fetchBrasilAPI(cep) {
-  const { status, data } = await getJson(`https://brasilapi.com.br/api/cep/v1/${cep}`);
+async function fetchBrasilAPI(cep, options = {}) {
+  const { status, data } = await getJson(
+    `https://brasilapi.com.br/api/cep/v1/${cep}`,
+    options
+  );
   if (status === 200 && data) {
     return buildNormalized({
       cep: normalizeCep(data.cep) || cep,
@@ -116,8 +126,11 @@ async function fetchBrasilAPI(cep) {
   throw new Error(`BrasilAPI status ${status}`);
 }
 
-async function fetchAwesomeAPI(cep) {
-  const { status, data } = await getJson(`https://cep.awesomeapi.com.br/json/${cep}`);
+async function fetchAwesomeAPI(cep, options = {}) {
+  const { status, data } = await getJson(
+    `https://cep.awesomeapi.com.br/json/${cep}`,
+    options
+  );
   if (
     status === 200 &&
     data &&
@@ -188,6 +201,31 @@ function isValidCep(value) {
   return /^\d{8}$/.test(value);
 }
 
+async function fetchProviderData(provider, cep, options = {}) {
+  try {
+    const data = await provider.fetch(cep, options);
+    const ok = !!data;
+    return {
+      provider: provider.name,
+      ok,
+      data: data || null,
+      error: ok ? null : 'CEP nao encontrado no provedor',
+    };
+  } catch (err) {
+    console.error(`Erro ao buscar dados do provedor ${provider.name}:`, err);
+    const message =
+      err && (err.name === 'AbortError' || err.message === 'Request timeout')
+        ? 'Timeout ao consultar provedor'
+        : err.message || 'Erro ao buscar dados do provedor';
+    return {
+      provider: provider.name,
+      ok: false,
+      data: null,
+      error: message,
+    };
+  }
+}
+
 async function checkProvidersHealth(cep) {
   const results = await Promise.all(
     providers.map(async (provider) => {
@@ -203,12 +241,16 @@ async function checkProvidersHealth(cep) {
           error: result ? null : 'CEP nao encontrado no provedor',
         };
       } catch (err) {
+        const message =
+          err && (err.name === 'AbortError' || err.message === 'Request timeout')
+            ? 'Timeout ao consultar provedor'
+            : err.message || 'Erro ao buscar dados do provedor';
         return {
           provider: provider.name,
           url: provider.healthUrl(cep),
           ok: false,
           responseTimeMs: Date.now() - startedAt,
-          error: err.message,
+          error: message,
         };
       }
     })
@@ -218,23 +260,18 @@ async function checkProvidersHealth(cep) {
 }
 
 async function fetchAllProviders(cep) {
+  // Promise.all preserva a ordem de entrada, mantendo o alinhamento com `providers`.
   const results = await Promise.all(
     providers.map(async (provider) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
       try {
-        const data = await provider.fetch(cep);
-        return {
-          provider: provider.name,
-          ok: Boolean(data),
-          data: data || null,
-          error: data ? null : 'CEP nao encontrado no provedor',
-        };
-      } catch (err) {
-        return {
-          provider: provider.name,
-          ok: false,
-          data: null,
-          error: err.message,
-        };
+        return await fetchProviderData(provider, cep, {
+          signal: controller.signal,
+          timeoutMs: PROVIDER_TIMEOUT_MS,
+        });
+      } finally {
+        clearTimeout(timeoutId);
       }
     })
   );
