@@ -18,7 +18,7 @@ Ou:
 node server.js
 ```
 
-A API sobe em `http://localhost:3000` (ou porta definida em `PORT`).
+A API sobe em `http://localhost:3004` (ou porta definida em `PORT`).
 
 ## Endpoint
 
@@ -28,10 +28,30 @@ A API sobe em `http://localhost:3000` (ou porta definida em `PORT`).
 - A API tenta, nesta ordem: ViaCEP, BrasilAPI, AwesomeAPI.
 - Se um falhar, tenta o proximo.
 
+## Health check
+
+`GET /health`
+
+- Testa a saude de cada provedor em uma unica rota.
+- Retorna `200` se todos estiverem ok, `503` se algum falhar.
+- CEP de teste padrao: `01001000` (pode sobrescrever por query ou `HEALTH_TEST_CEP`).
+
+Exemplo:
+
+```bash
+curl "http://localhost:3004/health"
+```
+
+Com CEP customizado:
+
+```bash
+curl "http://localhost:3004/health?cep=01001000"
+```
+
 ## Exemplo
 
 ```bash
-curl http://localhost:3000/cep/01001000
+curl http://localhost:3004/cep/01001000
 ```
 
 Resposta de sucesso (200):
