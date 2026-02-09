@@ -28,6 +28,19 @@ A API sobe em `http://localhost:3004` (ou porta definida em `PORT`).
 - A API tenta, nesta ordem: ViaCEP, BrasilAPI, AwesomeAPI.
 - Se um falhar, tenta o proximo.
 
+## Endpoint multiplo
+
+`GET /cep/:numeroCEP/multiple`
+
+- Consulta todos os provedores em paralelo e retorna o resultado completo.
+- Sempre retorna `200` com o resumo de cada provedor.
+
+Exemplo:
+
+```bash
+curl http://localhost:3004/cep/01001000/multiple
+```
+
 ## Health check
 
 `GET /health`

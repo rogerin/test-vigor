@@ -217,8 +217,34 @@ async function checkProvidersHealth(cep) {
   return results;
 }
 
+async function fetchAllProviders(cep) {
+  const results = await Promise.all(
+    providers.map(async (provider) => {
+      try {
+        const data = await provider.fetch(cep);
+        return {
+          provider: provider.name,
+          ok: Boolean(data),
+          data: data || null,
+          error: data ? null : 'CEP nao encontrado no provedor',
+        };
+      } catch (err) {
+        return {
+          provider: provider.name,
+          ok: false,
+          data: null,
+          error: err.message,
+        };
+      }
+    })
+  );
+
+  return results;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const matchMultiple = url.pathname.match(/^\/cep\/(\d{8})\/multiple$/);
   const match = url.pathname.match(/^\/cep\/(\d{8})$/);
 
   if (req.method !== 'GET') {
@@ -240,6 +266,15 @@ const server = http.createServer(async (req, res) => {
       status: allOk ? 'ok' : 'degraded',
       cepTest: cepToTest,
       providers: providersHealth,
+    });
+  }
+
+  if (matchMultiple) {
+    const cep = matchMultiple[1];
+    const results = await fetchAllProviders(cep);
+    return sendJson(res, 200, {
+      cep,
+      providers: results,
     });
   }
 
